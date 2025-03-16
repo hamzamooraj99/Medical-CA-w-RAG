@@ -1,6 +1,6 @@
 """
-2025.3.8
-2025.3.9
+2025.3.12
+2025.3.14
 4.49.0
 0.15.2
 __UNSLOTH_VERSIONING__
@@ -9,7 +9,7 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from trl.trainer.sft_trainer import (Any, AutoModelForCausalLM, AutoTokenizer, BaseImageProcessor, Callable, ConstantLengthDataset, DataCollator, DataCollatorForLanguageModeling, Dataset, EvalPrediction, FeatureExtractionMixin, IterableDataset, Optional, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, SFTConfig, SFTTrainer, Trainer, TrainerCallback, TrainingArguments, Type, Union, dataclasses, defaultdict, deprecate_kwarg, generate_model_card, get_comet_experiment_url, get_peft_model, is_liger_kernel_available, is_peft_available, is_wandb_available, nn, os, pack_examples, peft, peft_module_casting_to_bf16, prepare_model_for_kbit_training, torch, transformers, version, warnings, Callable, ConstantLengthDataset, DataCollator, Dataset, IterableDataset, Optional, Union, os, pack_examples, transformers, os)
+from trl.trainer.sft_trainer import (Any, AutoModelForCausalLM, AutoTokenizer, BaseImageProcessor, Callable, ConstantLengthDataset, DataCollator, DataCollatorForLanguageModeling, Dataset, EvalPrediction, FeatureExtractionMixin, IterableDataset, Optional, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, SFTConfig, SFTTrainer, Trainer, TrainerCallback, TrainingArguments, Type, Union, dataclasses, defaultdict, deprecate_kwarg, generate_model_card, get_comet_experiment_url, get_peft_model, is_liger_kernel_available, is_peft_available, is_wandb_available, nn, os, pack_examples, peft, peft_module_casting_to_bf16, prepare_model_for_kbit_training, torch, transformers, version, warnings, Callable, ConstantLengthDataset, DataCollator, DataCollatorForLanguageModeling, Dataset, IterableDataset, Optional, Union, os, pack_examples, transformers, os)
 
 
 import os
@@ -20,6 +20,8 @@ import torch
 import numpy as np
 from contextlib import nullcontext
 from torch.nn import functional as F
+from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+
 torch_compile_options = {
     "epilogue_fusion"   : True,
     "max_autotune"      : False,
@@ -629,6 +631,9 @@ class _UnslothSFTTrainer(Trainer):
     
         map_kwargs = {}
         use_desc = isinstance(dataset, Dataset)
+        is_vlm = hasattr(processing_class, "tokenizer")
+        tokenizer = processing_class
+        if is_vlm: tokenizer = processing_class.tokenizer
     
         # Get max length
         max_seq_length = getattr(args, "max_length", 0)
@@ -638,67 +643,104 @@ class _UnslothSFTTrainer(Trainer):
         dataset_text_field = getattr(args, "dataset_text_field", "text")
         do_truncation = max_seq_length != 0
         do_formatting_func = False
+        do_tokenize = True
+    
+        # Get correct column names
+        column_names = set(next(iter(dataset)).keys())
+        used_column_names = ["input_ids"]
+        if "attention_mask" in column_names:
+            used_column_names.append("attention_mask")
     
         # Check if already tokenized so skip
-        from transformers import DataCollatorForSeq2Seq
-        column_names = set(next(iter(dataset)).keys())
-        if "input_ids" in column_names:
+        from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+        if "labels" in column_names:
             # Most likely forgot data collator!
-            from transformers import DataCollatorForSeq2Seq
-            self.data_collator = DataCollatorForSeq2Seq(processing_class)
-            return dataset
+            if is_vlm and not hasattr(tokenizer, "pad"):
+                # Check if processing_class has a .pad, if not, use tokenizer.tokenizer
+                raise RuntimeError(f"Unsloth: {processing_class.__class__} does not have .pad!")
+            self.data_collator = DataCollatorForSeq2Seq(tokenizer)
+            used_column_names.append("labels")
+            do_tokenize = False
+        elif "input_ids" in column_names:
+            # Skip dataset prep, and set data collator
+            if is_vlm and not hasattr(tokenizer, "pad"):
+                # Check if processing_class has a .pad, if not, use tokenizer.tokenizer
+                raise RuntimeError(f"Unsloth: {processing_class.__class__} does not have .pad!")
+            self.data_collator = DataCollatorForLanguageModeling(tokenizer, mlm = False)
+            do_tokenize = False
         elif dataset_text_field not in column_names:
             do_formatting_func = True
             if formatting_func is None:
                 raise RuntimeError("Unsloth: You must specify a `formatting_func`")
         pass
     
-        # Check double BOS tokens
-        if do_formatting_func:
-            test_text = formatting_func(dataset[0])
-            if not isinstance(test_text, list):
-                raise ValueError(
-                    "Unsloth: The `formatting_func` should return a list of processed strings."
+        if do_tokenize:
+            # Check double BOS tokens
+            if do_formatting_func:
+                test_text = formatting_func(dataset[0])
+                if not isinstance(test_text, list):
+                    raise ValueError(
+                        "Unsloth: The `formatting_func` should return a list of processed strings."
+                    )
+                test_text = test_text[0]
+            else:
+                test_text = dataset[0][dataset_text_field]
+    
+            # Get chat template
+            chat_template = getattr(processing_class, 'chat_template', '')
+            if chat_template == '' and is_vlm:
+                chat_template = getattr(tokenizer, 'chat_template', '')
+            if chat_template is None:
+                chat_template = ''
+    
+            # Get bos_token
+            add_special_tokens = True
+            bos_token_1 = getattr(processing_class, 'bos_token', None)
+            bos_token_2 = getattr(tokenizer, 'bos_token', None)
+            bos_token = bos_token_1 or bos_token_2
+    
+            if bos_token is not None:
+                if test_text.startswith(bos_token) or bos_token in chat_template:
+                    add_special_tokens = False
+                    print("Unsloth: We found double BOS tokens - we shall remove one automatically.")
+            pass
+    
+            # Create tokenize function
+            def _tokenize(example):
+                return tokenizer(
+                    example[dataset_text_field] if not do_formatting_func else formatting_func(example),
+                    truncation = do_truncation,
+                    max_length = max_seq_length,
+                    return_token_type_ids = False,
+                    add_special_tokens = add_special_tokens,
                 )
-            test_text = test_text[0]
-        else:
-            test_text = dataset[0][dataset_text_field]
-        chat_template = getattr(processing_class, 'chat_template', None)
-        chat_template = '' if chat_template is None else chat_template
-        add_special_tokens = True
+            pass
     
-        if getattr(processing_class, 'bos_token', None) is not None:
-            if test_text.startswith(processing_class.bos_token) or processing_class.bos_token in chat_template:
-                add_special_tokens = False
-                print("Unsloth: We found double BOS tokens - we shall remove one automatically.")
+            map_kwargs["num_proc"] = getattr(args, "dataset_num_proc", 2)
+            if use_desc: map_kwargs["desc"] = f'Unsloth: Tokenizing ["{dataset_text_field}"]'
+            dataset = dataset.map(_tokenize, batched = True, **map_kwargs)
+    
+            # If VLM, switch data collator since .pad is needed!
+            if is_vlm and not hasattr(processing_class, "pad"):
+                data_collator = DataCollatorForLanguageModeling(tokenizer, mlm = False)
+                self.data_collator = data_collator
+            pass
         pass
-    
-        # Create tokenize function
-        def _tokenize(example):
-            return processing_class(
-                example[dataset_text_field] if not do_formatting_func else formatting_func(example),
-                truncation = do_truncation,
-                max_length = max_seq_length,
-                return_token_type_ids = False,
-                add_special_tokens = add_special_tokens,
-            )
-        pass
-    
-        map_kwargs["num_proc"] = getattr(args, "dataset_num_proc", 2)
-        if use_desc: map_kwargs["desc"] = f'Tokenizing to ["{dataset_text_field}"]'
-        dataset = dataset.map(_tokenize, batched = True, **map_kwargs)
-    
         if packing:
+            print("Unsloth: Hugging Face's packing is currently buggy - we're disabling it for now!")
+            return dataset
+    
             if max_seq_length == 0:
                 raise ValueError("When packing is enabled, `max_seq_length` can't be `None`.")
     
-            if use_desc: map_kwargs["desc"] = f"Packing {dataset_name} dataset"
-            dataset = dataset.select_columns("input_ids").map(
+            if use_desc: map_kwargs["desc"] = f"Unsloth: Packing {dataset_name} dataset"
+            dataset = dataset.select_columns(used_column_names).map(
                 pack_examples,
                 batched = True,
                 fn_kwargs = {"seq_length": max_seq_length,},
                 **map_kwargs,
             )
+        pass
         return dataset
     
     def compute_loss(self, model, inputs, return_outputs = False, num_items_in_batch = None):
@@ -865,14 +907,23 @@ class UnslothSFTTrainer(_UnslothSFTTrainer):
         if args is None: args = UnslothSFTConfig()
         use_bf16 = getattr(args, 'bf16', False)
         use_fp16 = getattr(args, 'fp16', False)
+        force_float32 = False
+        if os.environ.get('UNSLOTH_FORCE_FLOAT32', '0') == '1':
+            print('Unsloth: Switching to float32 training since model cannot work with float16')
+            force_float32 = True
+        mixed_precision_dtype = os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32')
         dtype = getattr(model.config, 'torch_dtype', None)
         if dtype is None: dtype = model.get_input_embeddings().dtype
         from unsloth_zoo.utils import _get_dtype
         dtype = _get_dtype(dtype)
         float16 = dtype == torch.float16
-        if float16 and use_bf16: raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
-        if not float16 and use_fp16: raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
-        if not use_bf16 and not use_fp16:
+        if not force_float32 and (float16 and use_bf16): raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
+        if not force_float32 and (not float16 and use_fp16): raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
+        if force_float32:
+            args.fp16 = False
+            args.bf16 = False
+            os.environ['ACCELERATE_MIXED_PRECISION'] = 'no'
+        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == 'float32':
             args.fp16 = float16
             args.bf16 = not float16
             os.environ['ACCELERATE_MIXED_PRECISION'] = 'fp16' if float16 else 'bf16'
@@ -893,7 +944,15 @@ class UnslothSFTTrainer(_UnslothSFTTrainer):
         bf16_full_eval = getattr(args, 'bf16_full_eval', False)
         if args.fp16 and bf16_full_eval: args.bf16_full_eval = False; args.fp16_full_eval = True
         if args.bf16 and fp16_full_eval: args.bf16_full_eval = True; args.fp16_full_eval = False
-        if not bf16_full_eval and not fp16_full_eval: args.bf16_full_eval = args.bf16; args.fp16_full_eval = args.fp16
+        if force_float32:
+            args.bf16_full_eval = False
+            args.fp16_full_eval = False
+        elif os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32') == 'bfloat16':
+            args.bf16_full_eval = True
+            args.fp16_full_eval = False
+        elif not bf16_full_eval and not fp16_full_eval:
+            args.bf16_full_eval = args.bf16
+            args.fp16_full_eval = args.fp16
         _output_logits = False
         if locals().get('compute_metrics', None) is not None: _output_logits = True
         if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
@@ -913,6 +972,23 @@ class UnslothSFTTrainer(_UnslothSFTTrainer):
         if 'processing_class' in locals():
             if hasattr(processing_class, 'padding_side'): processing_class.padding_side = 'right'
             if hasattr(processing_class, 'tokenizer') and hasattr(processing_class.tokenizer, 'padding_side'): processing_class.tokenizer.padding_side = 'right'
+        __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
+        from unsloth_zoo.vision_utils import UnslothVisionDataCollator
+        if not isinstance(data_collator, UnslothVisionDataCollator):
+            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
+                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm = False)
+            elif isinstance(data_collator, DataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+                data_collator = DataCollatorForSeq2Seq(__tokenizer)
+        else:
+            if hasattr(args, 'remove_unused_columns'): args.remove_unused_columns = False
+            if hasattr(args, 'dataset_text_field'): args.dataset_text_field = ''
+            if hasattr(args, 'dataset_kwargs'): args.dataset_kwargs = {'skip_prepare_dataset': True}
+        if not isinstance(data_collator, UnslothVisionDataCollator):
+            if not hasattr(__tokenizer, 'pad') and hasattr(__tokenizer, 'tokenizer'):
+                if isinstance(data_collator, DataCollatorForSeq2Seq):
+                    data_collator = DataCollatorForSeq2Seq(__tokenizer.tokenizer)
+                else:
+                    data_collator = DataCollatorForLanguageModeling(__tokenizer.tokenizer, mlm = False)
         other_metrics = []
         
         from unsloth_zoo.logging_utils import PatchRLStatistics

@@ -1,6 +1,6 @@
 """
-2025.3.8
-2025.3.9
+2025.3.12
+2025.3.14
 4.49.0
 0.15.2
 __UNSLOTH_VERSIONING__
@@ -21,6 +21,17 @@ __UNSLOTH_VERSIONING__
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import os
+import importlib.util
+if importlib.util.find_spec("unsloth_studio") is None:
+    UNSLOTH_STUDIO_ENABLED = False
+else:
+    UNSLOTH_STUDIO_ENABLED = os.environ.get("UNSLOTH_STUDIO_DISABLED", "0") == "0"
+pass
+from typing import List, Dict, Tuple, Optional, Any, Callable
+import math
+
 torch_compile_options = {'epilogue_fusion': True, 'max_autotune': False, 'shape_padding': True, 'trace.enabled': False, 'triton.cudagraphs': False}
 from torch import Tensor
 import torch
@@ -74,4 +85,4 @@ def forward(self, input: Tensor) -> Tensor:
         bn_training,
         exponential_average_factor,
         self.eps,
-    ).to(input.dtype)
+    ).to(input.dtype).to(input.dtype)

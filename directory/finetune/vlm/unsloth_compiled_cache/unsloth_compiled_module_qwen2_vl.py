@@ -1,6 +1,6 @@
 """
-2025.3.8
-2025.3.9
+2025.3.12
+2025.3.14
 4.49.0
 0.15.2
 __UNSLOTH_VERSIONING__
@@ -22,8 +22,23 @@ __UNSLOTH_VERSIONING__
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import os
+import importlib.util
+if importlib.util.find_spec("unsloth_studio") is None:
+    UNSLOTH_STUDIO_ENABLED = False
+else:
+    UNSLOTH_STUDIO_ENABLED = os.environ.get("UNSLOTH_STUDIO_DISABLED", "0") == "0"
+pass
+from typing import List, Dict, Tuple, Optional, Any, Callable
+import math
+
+
+import os
 import torch
 from unsloth_zoo.loss_utils import fused_linear_cross_entropy
+
+if UNSLOTH_STUDIO_ENABLED:
+    from unsloth_zoo.loss_utils import fast_linear_cross_entropy
 
 scaled_dot_product_attention = torch.nn.functional.scaled_dot_product_attention
 @torch.compiler.disable(recursive = False)
@@ -37,7 +52,7 @@ torch_compile_options = {'epilogue_fusion': True, 'max_autotune': False, 'shape_
 from torch.nn import CrossEntropyLoss
 
 @torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
-def uncompiled_cross_entropy_loss(self, hidden_states, labels,):
+def normal_cross_entropy_loss(self, hidden_states, labels):
     logits = self.lm_head(hidden_states)
     logits = logits.float()
     # Shift so that tokens < n predict n
@@ -87,9 +102,9 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers.models.qwen2_vl.modeling_qwen2_vl import (F, math, Any, Dict, List, Optional, Tuple, Union, torch, nn, LayerNorm, ACT2FN, Cache, StaticCache, GenerationMixin, AttentionMaskConverter, ROPE_INIT_FUNCTIONS, PreTrainedModel, add_start_docstrings, add_start_docstrings_to_model_forward, is_flash_attn_greater_or_equal_2_10, is_torchdynamo_compiling, replace_return_docstrings, Qwen2VLConfig, flash_attn_varlen_func, logger, __name__, _CONFIG_FOR_DOC, Qwen2VLCausalLMOutputWithPast, Qwen2VLModel, Qwen2VLPreTrainedModel, Qwen2VisionTransformerPretrainedModel, QWEN2_VL_INPUTS_DOCSTRING)
+from transformers.models.qwen2_vl.modeling_qwen2_vl import (F, math, Any, Dict, List, Optional, Tuple, Union, torch, nn, CrossEntropyLoss, LayerNorm, ACT2FN, Cache, StaticCache, GenerationMixin, AttentionMaskConverter, ROPE_INIT_FUNCTIONS, PreTrainedModel, add_start_docstrings, add_start_docstrings_to_model_forward, is_flash_attn_greater_or_equal_2_10, is_torchdynamo_compiling, replace_return_docstrings, Qwen2VLConfig, flash_attn_varlen_func, logger, __name__, _CONFIG_FOR_DOC, Qwen2VLCausalLMOutputWithPast, Qwen2VLModel, Qwen2VLPreTrainedModel, Qwen2VisionTransformerPretrainedModel, QWEN2_VL_INPUTS_DOCSTRING, Qwen2VLForConditionalGeneration)
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 @torch.no_grad()
 def Qwen2VLRotaryEmbedding_forward(self, x, position_ids):
     if "dynamic" in self.rope_type:
@@ -155,7 +170,7 @@ class Qwen2VLRotaryEmbedding(nn.Module):
         return Qwen2VLRotaryEmbedding_forward(self, x, position_ids)
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -163,7 +178,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
     """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors (https://qwenlm.github.io/blog/qwen2-vl/).
 
@@ -209,7 +224,7 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
     return q_embed, k_embed
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def apply_rotary_pos_emb_vision(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -224,7 +239,7 @@ def apply_rotary_pos_emb_vision(
     return q_embed, k_embed
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def PatchEmbed_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
     target_dtype = self.proj.weight.dtype
     hidden_states = hidden_states.view(
@@ -450,7 +465,7 @@ class VisionSdpaAttention(nn.Module):
         return VisionSdpaAttention_forward(self, hidden_states, cu_seqlens, rotary_pos_emb, position_embeddings)
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def Qwen2RMSNorm_forward(self, hidden_states):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
@@ -494,7 +509,7 @@ class Qwen2MLP(nn.Module):
         return Qwen2MLP_forward(self, x)
 
 
-@torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)
+@torch.compile(fullgraph = False, dynamic = True, options = torch_compile_options)
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -986,19 +1001,118 @@ def Qwen2VLForConditionalGeneration_forward(
     hidden_states = outputs[0]
     logits = EMPTY_LOGITS
     loss = None
+    NOT_RETURN_LOGITS = os.environ.get('UNSLOTH_RETURN_LOGITS', '0') == '0'
+    
+    all_locals = locals()
+    n_items = None
+    for __kwargs in all_locals.values():
+        if type(__kwargs) is dict:
+            n_items = __kwargs.get("num_items_in_batch", None) or __kwargs.get("n_items", None)
+            break
+    requires_grad_ = self.lm_head.weight.requires_grad
     if labels is None:
         logits = self.lm_head(hidden_states)
-    elif True and labels is not None:
-        n_items = loss_kwargs.get("num_items_in_batch", None) or loss_kwargs.get("n_items", None)
+    elif (UNSLOTH_STUDIO_ENABLED and NOT_RETURN_LOGITS and labels is not None and not requires_grad_):
+        loss = fast_linear_cross_entropy(
+            hidden_states        = hidden_states,
+            lm_head              = self.lm_head,
+            labels               = labels,
+            num_items_in_batch   = n_items,
+            logit_softcapping    = None if () == () else (),
+            logit_scale_multiply = None if () == () else (),
+            logit_scale_divide   = None if () == () else (),
+        )
+    elif (() == () and () == ()) and NOT_RETURN_LOGITS and self.loss_function.__name__.endswith("ForCausalLMLoss") and labels is not None and not requires_grad_:
         loss = fused_linear_cross_entropy(
             hidden_states      = hidden_states,
             lm_weight          = self.lm_head.weight,
-            labels             = labels,
+            labels             = labels.to(self.lm_head.weight.device),
             num_items_in_batch = n_items,
-            logit_softcapping  = getattr(self.config, "final_logit_softcapping", 0),
+            logit_softcapping  = None if () == () else (),
         )
     else:
-        loss, logits = uncompiled_cross_entropy_loss(self, hidden_states, labels,)
+        logits = self.lm_head(hidden_states)
+        def _compiled_loss_function(
+            output_logits : torch.Tensor,
+            output_labels : torch.Tensor,
+            logit_scale_multiply : float = 0,
+            logit_scale_divide : float = 0,
+            logit_softcapping : float = 0,
+            vocab_size : int = 0,
+            n_items : int = 0,
+        ):
+            device = output_logits.device
+            if logit_scale_multiply != 0:
+                output_logits = output_logits * logit_scale_multiply
+            if logit_scale_divide != 0:
+                output_logits = output_logits / logit_scale_divide
+            if logit_softcapping != 0:
+                output_logits = output_logits / logit_softcapping
+                output_logits = torch.tanh(output_logits)
+                output_logits = output_logits * logit_softcapping
+    
+            shift_logits = output_logits
+            shift_labels = torch.empty_like(output_labels, device = device)
+            shift_labels[..., :-1] = output_labels[..., 1:]
+            shift_labels[..., -1] = -100
+            # shift_logits = output_logits[..., :-1, :].float().contiguous()
+            # shift_labels = output_labels[..., 1:].contiguous()
+    
+            shift_logits = shift_logits.view(-1, vocab_size)
+            shift_labels = shift_labels.view(-1)
+    
+            n_chunks = int(math.ceil((vocab_size / 262144) * 8))
+            if requires_grad_: n_chunks += 2
+            __shift_logits = torch.chunk(shift_logits, n_chunks, dim = 0)
+            __shift_labels = torch.chunk(shift_labels, n_chunks, dim = 0)
+            loss = 0.0
+            for (_shift_logits, _shift_labels) in zip(__shift_logits, __shift_labels):
+                loss += torch.nn.functional.cross_entropy(
+                    input  = _shift_logits.float().contiguous(),
+                    target = _shift_labels.contiguous(),
+                    reduction = 'sum',
+                )
+            pass
+            if n_items != 0:
+                loss = loss / n_items
+            else:
+                loss = loss / (shift_labels != -100).sum()
+            return loss
+        pass
+        _compiled_loss_function = torch.compile(
+            _compiled_loss_function,
+            fullgraph = False,
+            dynamic = True,
+            options = torch_compile_options,
+        )
+        torch._dynamo.mark_dynamic(logits, 1)
+        torch._dynamo.mark_dynamic(labels, 1)
+        loss = _compiled_loss_function(
+            output_logits        = logits,
+            output_labels        = labels,
+            logit_scale_multiply = () if () != () else 0,
+            logit_scale_divide   = () if () != () else 0,
+            logit_softcapping    = () if () != () else 0,
+            vocab_size           = (self.config.vocab_size),
+            n_items              = n_items if n_items is not None else 0,
+        )
+        # if () != ():
+        #     logits = logits * ()
+        # if () != ():
+        #     logits = logits / ()
+        # if () != ():
+        #     logits = logits / ()
+        #     logits = torch.tanh(logits)
+        #     logits = logits * ()
+        # shift_logits = logits[..., :-1, :].float().contiguous()
+        # shift_labels = labels[..., 1:].contiguous()
+        # reduction = 'mean' if n_items is None else 'sum'
+        # loss_fct = torch.nn.CrossEntropyLoss(reduction = reduction)
+        # shift_logits = shift_logits.view(-1, self.config.vocab_size)
+        # shift_labels = shift_labels.view(-1)
+        # shift_labels = shift_labels.to(shift_logits.device)
+        # loss = loss_fct(shift_logits, shift_labels)
+        # if n_items is not None: loss = loss / n_items
 
 
     if not return_dict:
