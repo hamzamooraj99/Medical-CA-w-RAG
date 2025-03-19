@@ -1,6 +1,6 @@
 """
-2025.3.8
-2025.3.9
+2025.3.12
+2025.3.14
 4.49.0
 0.15.2
 __UNSLOTH_VERSIONING__
@@ -20,6 +20,8 @@ import torch
 import numpy as np
 from contextlib import nullcontext
 from torch.nn import functional as F
+from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+
 torch_compile_options = {
     "epilogue_fusion"   : True,
     "max_autotune"      : False,
@@ -212,6 +214,48 @@ def grpo_accumulated_loss(
         )
         return loss, completion_length, mean_kl
     pass
+
+@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options)
+def grpo_compute_loss_slow(old_logits, new_logits, input_ids, mask, beta, advantages):
+    # All Unsloth Zoo code licensed under LGPLv3
+    old_logits = old_logits.to(torch.float32)
+    new_logits = new_logits.to(torch.float32)
+    input_ids  = input_ids.unsqueeze(-1)
+
+    # x_i - logsumexp(x_i)
+    old_x = torch.gather(old_logits, dim = -1, index = input_ids).squeeze(-1)
+    new_x = torch.gather(new_logits, dim = -1, index = input_ids).squeeze(-1)
+    old = old_x - torch.logsumexp(old_logits, dim = -1)
+    new = new_x - torch.logsumexp(new_logits, dim = -1)
+
+    # Reverse KL
+    kl_i = torch.exp(old - new) - (old - new) - 1.0
+    # Full correct reverse KL divergence?? Missing term maybe?
+    # kl_i = torch.exp(new) * kl_i
+
+    # Below is forward KL (normal KL)
+    # kl_i = torch.exp(old) * (old - new)
+
+    # Must detach - otherwise gradients are not propagated correctly!
+    # exp(x - x) == 1
+    loss_i = torch.exp(new - new.detach()) * advantages.unsqueeze(1)
+    loss_i = -(loss_i - beta * kl_i)
+
+    mask = mask.to(torch.float32)
+    n_mask_per_reward = mask.sum(1)
+
+    # See https://github.com/huggingface/trl/pull/2881
+    # loss_per_reward = (loss_i * mask).sum(1) / n_mask_per_reward
+    # loss = loss_per_reward.mean()
+    loss = (loss_i * mask).sum() / mask.sum()
+    
+    # Get metrics as well which are folded
+    with torch.inference_mode():
+        completion_length = n_mask_per_reward.mean()
+        mean_kl_per_reward = (kl_i * mask).sum(1) / n_mask_per_reward
+        mean_kl = mean_kl_per_reward.mean()
+    pass
+    return loss, completion_length, mean_kl
 
 def vLLMSamplingParams(**kwargs):
     from vllm import SamplingParams
@@ -864,9 +908,12 @@ class _UnslothGRPOTrainer(Trainer):
 
     # Get the per-token log probabilities for the completions for the model and the reference model
     def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep):
-        return None # Unsloth efficient GRPO
+        if os.environ.get('UNSLOTH_USE_NEW_MODEL', '0') == '0':
+            return None # Unsloth efficient GRPO
+        # Otherwise, calculate normally:
         if not hasattr(self, '_autocast_dtype'):
             self._autocast_dtype = torch.float16 if os.environ.get('ACCELERATE_MIXED_PRECISION', 'fp16') == 'fp16' else torch.bfloat16
+            if os.environ.get('UNSLOTH_FORCE_FLOAT32', '0') == '1': self._autocast_dtype = torch.float32
         with torch.amp.autocast(device_type = 'cuda', dtype = self._autocast_dtype):
             # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
             logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
@@ -1080,8 +1127,8 @@ class _UnslothGRPOTrainer(Trainer):
         # per_token_loss = -(per_token_loss - self.beta * per_token_kl)
         # loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
         input_ids = input_ids[:, -logits_to_keep:]
-        if False:#per_token_logps is not None:
-            loss, completion_length, mean_kl = grpo_compute_loss(
+        if per_token_logps is not None:
+            loss, completion_length, mean_kl = grpo_compute_loss_slow(
                 ref_per_token_logps, per_token_logps, input_ids, completion_mask, self.beta, advantages,
             )
         else:
@@ -1291,14 +1338,23 @@ class UnslothGRPOTrainer(_UnslothGRPOTrainer):
         if args is None: args = UnslothGRPOConfig()
         use_bf16 = getattr(args, 'bf16', False)
         use_fp16 = getattr(args, 'fp16', False)
+        force_float32 = False
+        if os.environ.get('UNSLOTH_FORCE_FLOAT32', '0') == '1':
+            print('Unsloth: Switching to float32 training since model cannot work with float16')
+            force_float32 = True
+        mixed_precision_dtype = os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32')
         dtype = getattr(model.config, 'torch_dtype', None)
         if dtype is None: dtype = model.get_input_embeddings().dtype
         from unsloth_zoo.utils import _get_dtype
         dtype = _get_dtype(dtype)
         float16 = dtype == torch.float16
-        if float16 and use_bf16: raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
-        if not float16 and use_fp16: raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
-        if not use_bf16 and not use_fp16:
+        if not force_float32 and (float16 and use_bf16): raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
+        if not force_float32 and (not float16 and use_fp16): raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
+        if force_float32:
+            args.fp16 = False
+            args.bf16 = False
+            os.environ['ACCELERATE_MIXED_PRECISION'] = 'no'
+        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == 'float32':
             args.fp16 = float16
             args.bf16 = not float16
             os.environ['ACCELERATE_MIXED_PRECISION'] = 'fp16' if float16 else 'bf16'
@@ -1319,7 +1375,15 @@ class UnslothGRPOTrainer(_UnslothGRPOTrainer):
         bf16_full_eval = getattr(args, 'bf16_full_eval', False)
         if args.fp16 and bf16_full_eval: args.bf16_full_eval = False; args.fp16_full_eval = True
         if args.bf16 and fp16_full_eval: args.bf16_full_eval = True; args.fp16_full_eval = False
-        if not bf16_full_eval and not fp16_full_eval: args.bf16_full_eval = args.bf16; args.fp16_full_eval = args.fp16
+        if force_float32:
+            args.bf16_full_eval = False
+            args.fp16_full_eval = False
+        elif os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32') == 'bfloat16':
+            args.bf16_full_eval = True
+            args.fp16_full_eval = False
+        elif not bf16_full_eval and not fp16_full_eval:
+            args.bf16_full_eval = args.bf16
+            args.fp16_full_eval = args.fp16
         _output_logits = False
         if locals().get('compute_metrics', None) is not None: _output_logits = True
         if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
