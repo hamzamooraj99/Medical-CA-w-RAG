@@ -6,10 +6,16 @@ import json
 import faiss
 from gtts import gTTS
 import tempfile
+import gradio as gr
+import os
 
 # User Input containers for UI
-user_text, user_image, user_audio = None
+user_text = None
+user_image = None
+user_audio = None
 rag_switch = False
+
+
 
 #region LOAD MODELS
 
@@ -42,7 +48,10 @@ rag_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 def preprocess_text(text, vision_response, retrieved_info, rag_flag):
     if(rag_flag):
         alpaca_prompt = """ 
-            Below is a query from a user regarding a medical condition or a description of symptoms. The user may also provide an image related to the query. Please provide an appropriate response to the user input with reference to the image response (if provided), making use of the retrieved information from the knowledge source.
+            You are a medical assistant providing health information.  
+            - Use the retrieved information to **enhance the accuracy** of your response.  
+            - Do **not generate external links** unless explicitly stated by the user.  
+            - Respond clearly and concisely. 
             ### User Input:
             {}  
 
@@ -111,8 +120,10 @@ def transcribe_audio(audio_input):
 #region RAG PIPELINE
 class RAGPipeline:
     def __init__(self, user_text, vision_response, k=5):
-        self.index = faiss.read_index(r'..\..\dataset\nhsInform\faiss_index.bin')
-        with open(r'..\..\dataset\nhsInform\texts.json', "r", encoding="utf-8") as f:
+        faiss_path = os.path.abspath(r".\dataset\nhsInform\faiss_index.bin")
+        texts_json = os.path.abspath(r'.\dataset\nhsInform\texts.json')
+        self.index = faiss.read_index(faiss_path)
+        with open(texts_json, "r", encoding="utf-8") as f:
             self.texts = json.load(f)
         self.k = k
         self.query = self.embed_query(user_text, vision_response)
@@ -162,7 +173,15 @@ def gen_final_response(inputs):
 
     with torch.no_grad():
         outputs = text_model.generate(**inputs, **gen_kwargs)
-        return text_processor.decode(outputs[0], skip_special_tokens=True)
+        full_output = text_processor.decode(outputs[0], skip_special_tokens=True)
+        response_start = full_output.find("### Response:")
+        if response_start != -1:
+            final_response = full_output[response_start + len("### Response:"):].strip()
+        else:
+            final_response = full_output.strip()
+
+        return final_response
+    
 #endregion
 
 
@@ -180,10 +199,12 @@ def text_to_speech(text):
 def play_answer(final_response):
     audio_file = text_to_speech(final_response)
     return audio_file
+#end region
 
 
-#region MAIN
-if __name__ == '__main__':
+
+#region TRIMODEL PIPELINE
+def trimodel_pipeline(user_text, user_image, user_audio, rag_switch):
     if(user_audio):
         user_text = transcribe_audio(user_audio)
     
@@ -198,4 +219,39 @@ if __name__ == '__main__':
         final_response = gen_final_response(inputs)
 
     audio_file = play_answer(final_response)
+
+    return final_response, audio_file
+#endregion
+
+
+
+#region GRADIO COMPONENTS
+with gr.Blocks() as interface:
+    gr.Markdown("### 🏥 **Medical Multimodal Conversational Agent with RAG**")
+    
+    with gr.Row():
+        with gr.Column():
+            text_input = gr.Textbox(label="Text or Transcribed Speech", placeholder="Type or use speech input...")
+            audio_input = gr.Audio(label="Upload Speech", type="filepath")
+            image_input = gr.Image(label="Upload Medical Image", type="pil")
+        
+        with gr.Column():
+            rag_switch = gr.Checkbox(label="Enable RAG", value=False)
+            output_text = gr.Textbox(label="Response", interactive=False)
+            output_audio = gr.Audio(label="Response Audio", interactive=False)
+
+    # Define interaction logic
+    submit_btn = gr.Button("Submit")
+    submit_btn.click(
+        fn=trimodel_pipeline,
+        inputs=[text_input, image_input, audio_input, rag_switch],
+        outputs=[output_text, output_audio]
+    )
+#endregion
+
+
+
+#region MAIN
+if __name__ == '__main__':
+    interface.launch()
 #endregion
