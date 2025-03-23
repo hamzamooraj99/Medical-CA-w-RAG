@@ -204,7 +204,7 @@ def play_answer(final_response):
 
 
 #region TRIMODEL PIPELINE
-def trimodel_pipeline(user_text, user_image, user_audio, rag_switch):
+def trimodel_pipeline(user_text, user_audio, rag_switch):
     if(user_audio):
         user_text = transcribe_audio(user_audio)
     

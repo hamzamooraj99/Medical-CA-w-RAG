@@ -1,6 +1,6 @@
 """
-2025.3.8
-2025.3.9
+2025.3.12
+2025.3.14
 4.49.0
 0.15.2
 __UNSLOTH_VERSIONING__
@@ -20,6 +20,8 @@ import torch
 import numpy as np
 from contextlib import nullcontext
 from torch.nn import functional as F
+from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+
 torch_compile_options = {
     "epilogue_fusion"   : True,
     "max_autotune"      : False,
@@ -1087,6 +1089,23 @@ class UnslothRLOOTrainer(_UnslothRLOOTrainer):
         if 'processing_class' in locals():
             if hasattr(processing_class, 'padding_side'): processing_class.padding_side = 'right'
             if hasattr(processing_class, 'tokenizer') and hasattr(processing_class.tokenizer, 'padding_side'): processing_class.tokenizer.padding_side = 'right'
+        __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
+        from unsloth_zoo.vision_utils import UnslothVisionDataCollator
+        if not isinstance(data_collator, UnslothVisionDataCollator):
+            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
+                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm = False)
+            elif isinstance(data_collator, DataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+                data_collator = DataCollatorForSeq2Seq(__tokenizer)
+        else:
+            if hasattr(args, 'remove_unused_columns'): args.remove_unused_columns = False
+            if hasattr(args, 'dataset_text_field'): args.dataset_text_field = ''
+            if hasattr(args, 'dataset_kwargs'): args.dataset_kwargs = {'skip_prepare_dataset': True}
+        if not isinstance(data_collator, UnslothVisionDataCollator):
+            if not hasattr(__tokenizer, 'pad') and hasattr(__tokenizer, 'tokenizer'):
+                if isinstance(data_collator, DataCollatorForSeq2Seq):
+                    data_collator = DataCollatorForSeq2Seq(__tokenizer.tokenizer)
+                else:
+                    data_collator = DataCollatorForLanguageModeling(__tokenizer.tokenizer, mlm = False)
         other_metrics = []
         
         from unsloth_zoo.logging_utils import PatchRLStatistics
