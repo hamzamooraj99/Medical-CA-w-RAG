@@ -154,7 +154,7 @@ class RAGPipeline:
 
 
 #region MODEL GENS
-def gen_image_response():
+def gen_image_response(user_image):
     if user_image:
         vision_inputs = preprocess_image(user_image, user_text)
         with torch.no_grad():
@@ -204,11 +204,11 @@ def play_answer(final_response):
 
 
 #region TRIMODEL PIPELINE
-def trimodel_pipeline(user_text, user_audio, rag_switch):
+def trimodel_pipeline(user_text, user_image, user_audio, rag_switch):
     if(user_audio):
         user_text = transcribe_audio(user_audio)
     
-    vision_response = gen_image_response()
+    vision_response = gen_image_response(user_image)
 
     if(rag_switch):
         retrieved_info = RAGPipeline(user_text, vision_response).context
